@@ -5,12 +5,13 @@ Wake word ("Hey Jarvis" / "Привет, Джарвис") -> record -> Whisper -
 
 Settings live in config.json next to this file (copy config.example.json). Run:  python jarvis.py
 Extra commands:  python jarvis.py --doctor (check the setup, says what to fix)
+                 python jarvis.py --update (install the newest version now; it also updates itself every 6 h)
                  python jarvis.py --test   (check microphone, voice and brain without the wake word)
                  python jarvis.py --look   (take one camera photo, prints its path)
 """
 import asyncio, io, json, os, queue, re, shutil, subprocess, sys, tempfile, threading, time, wave
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 HERE = os.path.dirname(os.path.abspath(__file__))
 IS_WIN = sys.platform.startswith("win")
 DATA = os.path.join(os.path.expanduser("~"), ".jarvis-assistant")
@@ -41,6 +42,8 @@ DEFAULTS = {
     "mic_device": None,                   # None = system default; or a name part, e.g. "BRIO"
     "wake_threshold": 0.5,
     "followup_seconds": 10,
+    "auto_update": True,                  # check GitHub for a new version every 6 h and install it between conversations
+    "update_repo": "kidlav2/jarvis",
 }
 
 def load_config():
@@ -544,12 +547,87 @@ def kws_check(pcm):
     rest = t[m.end():].strip(" .,!?")
     return rest if len(rest.split()) >= 2 else ""
 
+# ---------------------------------------------------------------- self-update
+KEEP = ("config.json", ".venv", ".git", "__pycache__")          # never overwritten by an update
+STAGE = os.path.join(DATA, "update")
+UPDATE_READY = [None]                                          # version staged and waiting to be installed
+
+def vtuple(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v)[:3])
+
+def check_update():
+    """Download the newest GitHub release into a staging folder (does not touch the running program)."""
+    import requests, zipfile
+    r = requests.get(f"https://api.github.com/repos/{CFG['update_repo']}/releases/latest", timeout=15,
+                     headers={"Accept": "application/vnd.github+json", "User-Agent": "jarvis-updater"})
+    if r.status_code == 404: return None
+    r.raise_for_status()
+    rel = r.json(); tag = rel.get("tag_name", "")
+    if not tag or vtuple(tag) <= vtuple(__version__): return None
+    z = requests.get(rel["zipball_url"], timeout=120, headers={"User-Agent": "jarvis-updater"}); z.raise_for_status()
+    shutil.rmtree(STAGE, ignore_errors=True); os.makedirs(STAGE)
+    with zipfile.ZipFile(io.BytesIO(z.content)) as zf:
+        zf.extractall(STAGE)
+    root = os.path.join(STAGE, os.listdir(STAGE)[0])
+    new = os.path.join(root, "jarvis.py")
+    check = subprocess.run([sys.executable, "-m", "py_compile", new], capture_output=True)
+    if check.returncode != 0:                                   # broken release: do not install
+        log("обновление", tag, "не прошло проверку, пропускаю"); shutil.rmtree(STAGE, ignore_errors=True); return None
+    with open(os.path.join(STAGE, "notes.txt"), "w", encoding="utf-8") as f:
+        f.write(json.dumps({"version": tag.lstrip("v"), "root": root, "notes": rel.get("body", "")}, ensure_ascii=False))
+    return tag.lstrip("v")
+
+def install_update():
+    """Copy the staged release over this folder, keeping settings, keys and libraries; reinstall libraries if needed."""
+    info = json.load(open(os.path.join(STAGE, "notes.txt"), encoding="utf-8"))
+    root = info["root"]
+    backup = os.path.join(DATA, "backup-" + __version__)
+    shutil.rmtree(backup, ignore_errors=True); os.makedirs(backup)
+    old_req = open(os.path.join(HERE, "requirements.txt"), encoding="utf-8").read() if os.path.exists(os.path.join(HERE, "requirements.txt")) else ""
+    for name in os.listdir(root):
+        if name in KEEP or name.endswith("_key.txt"): continue
+        src, dst = os.path.join(root, name), os.path.join(HERE, name)
+        if os.path.exists(dst):
+            (shutil.copytree if os.path.isdir(dst) else shutil.copy2)(dst, os.path.join(backup, name))
+            if os.path.isdir(dst): shutil.rmtree(dst)
+        (shutil.copytree if os.path.isdir(src) else shutil.copy2)(src, dst)
+    if open(os.path.join(HERE, "requirements.txt"), encoding="utf-8").read() != old_req:
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r", os.path.join(HERE, "requirements.txt")])
+    with open(os.path.join(DATA, "updated.txt"), "w", encoding="utf-8") as f: f.write(info["version"])
+    shutil.rmtree(STAGE, ignore_errors=True)
+    log("обновлено до", info["version"], "— перезапуск. Старая версия сохранена в", backup)
+    os.execv(sys.executable, [sys.executable] + sys.argv)       # restart with the new code
+
+def updater():
+    if not CFG["auto_update"] or os.path.isdir(os.path.join(HERE, ".git")):
+        return                                                  # developers update with git themselves
+    time.sleep(60)
+    while True:
+        try:
+            v = check_update()
+            if v: UPDATE_READY[0] = v; log("найдено обновление", v, "— поставлю, когда разговор закончится")
+        except Exception as e:
+            log("проверка обновлений не удалась:", e)
+        time.sleep(6 * 3600)
+
+def announce_update(mic, ears):
+    p = os.path.join(DATA, "updated.txt")
+    if os.path.exists(p):
+        v = open(p, encoding="utf-8").read().strip(); os.remove(p)
+        try: speak(f"Я обновился до версии {v}.", mic, ears)
+        except Exception: pass
+
 def main():
     import numpy as np
     mic, ears = Mic(), Ears()
-    log(f"{NAME} слушает: «Hey Jarvis» или «Привет, {NAME}». Ctrl+C — выход.")
+    log(f"{NAME} {__version__} слушает: «Hey Jarvis» или «Привет, {NAME}». Ctrl+C — выход.")
+    threading.Thread(target=updater, daemon=True).start()
+    announce_update(mic, ears)
     seg, pre, sil = [], [], 0.0
     while True:
+        if UPDATE_READY[0] and not seg:                   # only between conversations
+            try: install_update()
+            except Exception as e: log("обновление не установилось:", e); UPDATE_READY[0] = None
         f = mic.read()
         woke = ears.wake(f)
         cmd = None
@@ -702,6 +780,10 @@ if __name__ == "__main__":
         to_logfile()
     if "--version" in sys.argv:
         print(__version__)
+    elif "--update" in sys.argv:
+        v = check_update()
+        if v: print("Ставлю версию", v); sys.argv.remove("--update"); sys.argv.append("--version"); install_update()
+        else: print("У тебя последняя версия:", __version__)
     elif "--setup" in sys.argv:
         setup()
     elif "--doctor" in sys.argv:

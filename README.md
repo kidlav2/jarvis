@@ -69,6 +69,7 @@
 | `camera`, `camera_index` | камера вкл/выкл и её номер |
 | `mic_device` | часть названия микрофона, например `"BRIO"` (пусто — системный) |
 | `wake_threshold` | чувствительность к «Hey Jarvis», 0.3–0.7 |
+| `auto_update` | автообновление, по умолчанию включено |
 
 Ключи хранятся только в файлах `groq_key.txt`, `eleven_key.txt` рядом с программой. В репозиторий они не попадают.
 
@@ -94,9 +95,11 @@ macOS:    .venv/bin/python jarvis.py --doctor
 
 Удаление: `uninstall.cmd` (Windows) или `bash uninstall.sh` (macOS).
 
-## Версии
+## Обновления
 
-История изменений в [CHANGELOG.md](CHANGELOG.md), готовые версии в [Releases](https://github.com/kidlav2/jarvis/releases).
+Джарвис обновляется сам: раз в 6 часов проверяет новую версию, ставит её между разговорами и говорит «Я обновился до версии …». Твои настройки и ключи остаются. Обновиться сразу: `jarvis.py --update`. Выключить: `"auto_update": false` в `config.json`.
+
+История изменений в [CHANGELOG.md](CHANGELOG.md), все версии в [Releases](https://github.com/kidlav2/jarvis/releases).
 
 ---
 

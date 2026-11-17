@@ -38,6 +38,7 @@ Python must be 3.10–3.12 (onnxruntime / openWakeWord wheels). Never use a newe
 - New config keys go into `DEFAULTS` with a comment, into `config.example.json` if users should see them, and into the README table.
 - Check before finishing: `python -m py_compile jarvis.py`, `python jarvis.py --doctor`, and the part you changed with `--test`.
 - **Versions:** bump `__version__` in `jarvis.py` (SemVer), add an entry at the top of `CHANGELOG.md`, commit, then tag `vX.Y.Z` and create a GitHub release with the changelog entry as notes.
+- **Releases ship to users automatically.** Installed copies poll `releases/latest` every 6 h and install it (see `check_update` / `install_update`). Never publish a release you have not run: `py_compile`, `--doctor`, `--test`. Files in `KEEP` and `*_key.txt` are never overwritten; a git checkout skips self-update.
 
 ## Troubleshooting map
 

@@ -1,0 +1,19 @@
+{
+  "assistant_name": "Джарвис",
+  "owner_name": "",
+  "city": "",
+  "language": "ru",
+
+  "brain": "claude",
+  "brain_model": "",
+
+  "stt": "local",
+  "stt_model": "large-v3-turbo",
+
+  "tts": "edge",
+  "edge_voice": "ru-RU-DmitryNeural",
+  "elevenlabs_voice": "onwK4e9ZLuTAKqWW03F9",
+
+  "camera": true,
+  "camera_index": 0
+}

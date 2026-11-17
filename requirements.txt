@@ -1,0 +1,10 @@
+numpy
+requests
+sounddevice
+miniaudio
+openwakeword
+onnxruntime
+edge-tts
+faster-whisper
+opencv-python-headless
+piper-tts

@@ -4,11 +4,13 @@ Wake word ("Hey Jarvis" / "Привет, Джарвис") -> record -> Whisper -
 -> voice (Edge TTS free, or ElevenLabs) -> speakers. Nothing leaves the computer until the wake word is heard.
 
 Settings live in config.json next to this file (copy config.example.json). Run:  python jarvis.py
-Extra commands:  python jarvis.py --look   (take one camera photo, prints its path)
+Extra commands:  python jarvis.py --doctor (check the setup, says what to fix)
                  python jarvis.py --test   (check microphone, voice and brain without the wake word)
+                 python jarvis.py --look   (take one camera photo, prints its path)
 """
 import asyncio, io, json, os, queue, re, shutil, subprocess, sys, tempfile, threading, time, wave
 
+__version__ = "1.1.0"
 HERE = os.path.dirname(os.path.abspath(__file__))
 IS_WIN = sys.platform.startswith("win")
 DATA = os.path.join(os.path.expanduser("~"), ".jarvis-assistant")
@@ -36,6 +38,7 @@ DEFAULTS = {
     "elevenlabs_model": "eleven_v4_turbo",
     "camera": True,
     "camera_index": 0,
+    "mic_device": None,                   # None = system default; or a name part, e.g. "BRIO"
     "wake_threshold": 0.5,
     "followup_seconds": 10,
 }
@@ -409,7 +412,7 @@ class Mic:
     def __init__(self):
         import sounddevice as sd
         self.q = queue.Queue()
-        self.stream = sd.InputStream(samplerate=SR, channels=1, dtype="int16", blocksize=BLOCK,
+        self.stream = sd.InputStream(samplerate=SR, channels=1, dtype="int16", blocksize=BLOCK, device=CFG["mic_device"],
                                      callback=lambda d, *_: self.q.put(d[:, 0].copy()))
         self.stream.start()
     def read(self):
@@ -584,8 +587,126 @@ def self_test():
     mic, ears = Mic(), Ears(); pcm = record(mic, ears, wait_start=5)
     print("   услышал:", transcribe(pcm) if pcm is not None else "(тишина)")
 
+def doctor():
+    """Check everything a friend's computer needs, in plain words. Returns the number of problems."""
+    ok = lambda m: print("  OK   ", m)
+    bad = []
+    def fail(m, fix):
+        print("  FAIL ", m, "\n        как исправить:", fix); bad.append(m)
+    print(f"Jarvis {__version__} — проверка ({sys.platform}, Python {sys.version.split()[0]})")
+    if sys.version_info[:2] not in ((3, 10), (3, 11), (3, 12)):
+        fail(f"Python {sys.version.split()[0]}", "нужен Python 3.10–3.12, переустанови через установщик")
+    else: ok("Python")
+    for mod in ("numpy", "sounddevice", "miniaudio", "openwakeword", "edge_tts", "requests"):
+        try: __import__(mod); ok(f"модуль {mod}")
+        except Exception as e: fail(f"модуль {mod}: {e}", "запусти установщик ещё раз")
+    if os.path.exists(os.path.join(HERE, "config.json")): ok("config.json")
+    else: fail("нет config.json", "скопируй config.example.json в config.json")
+    if not CFG["owner_name"]: print("  INFO  owner_name не задан: Джарвис не знает, как тебя зовут")
+    b = CFG["brain"]
+    exe = {"claude": "claude", "cursor": "cursor-agent", "codex": "codex"}.get(b)
+    if exe:
+        if shutil.which(exe): ok(f"мозг {b}: найден {exe}")
+        else: fail(f"мозг {b}: не найдена программа {exe}", "установи её и войди в аккаунт (README, раздел «Что нужно»)")
+    elif b == "api":
+        if read_secret(CFG["api_key_file"]) or "127.0.0.1" in CFG["api_url"] or "localhost" in CFG["api_url"]:
+            try:
+                import requests
+                r = requests.get(CFG["api_url"].rstrip("/") + "/models", timeout=8,
+                                 headers={"Authorization": "Bearer " + read_secret(CFG["api_key_file"])})
+                ok(f"мозг api: {CFG['api_url']} отвечает") if r.ok else fail(f"мозг api: ответ {r.status_code}", "проверь ключ в " + CFG["api_key_file"])
+            except Exception as e: fail(f"мозг api: {e}", "проверь интернет и api_url")
+        else: fail(f"нет ключа {CFG['api_key_file']}", "получи бесплатный ключ на console.groq.com и вставь в этот файл")
+    else: fail(f"неизвестный brain «{b}»", "claude, cursor, codex или api")
+    if CFG["stt"] == "local":
+        try: __import__("faster_whisper"); ok(f"распознавание: локально ({CFG['stt_model']})")
+        except Exception as e: fail(f"faster-whisper: {e}", "запусти установщик ещё раз или поставь \"stt\": \"groq\"")
+    elif CFG["stt"] == "groq" and not read_secret(CFG["groq_key_file"]):
+        fail("stt groq: нет ключа " + CFG["groq_key_file"], "получи бесплатный ключ на console.groq.com")
+    else: ok(f"распознавание: {CFG['stt']}")
+    if CFG["tts"] == "elevenlabs" and not read_secret(CFG["elevenlabs_key_file"]):
+        fail("голос ElevenLabs: нет ключа " + CFG["elevenlabs_key_file"], "вставь ключ или поставь \"tts\": \"edge\"")
+    else: ok(f"голос: {CFG['tts']}")
+    try:
+        import sounddevice as sd
+        dev = sd.query_devices(CFG["mic_device"], kind="input"); ok(f"микрофон: {dev['name']}")
+        sd.query_devices(kind="output"); ok("колонки найдены")
+    except Exception as e: fail(f"звук: {e}", "подключи микрофон или проверь mic_device в config.json")
+    if CFG["camera"]:
+        try: __import__("cv2"); ok("модуль камеры (снимок проверяется в --test)")
+        except Exception as e: fail(f"камера: {e}", "запусти установщик ещё раз или поставь \"camera\": false")
+    print("Итог:", "всё в порядке" if not bad else f"проблем: {len(bad)}")
+    return len(bad)
+
+def setup():
+    """Interactive first-time setup, same on Windows and macOS. Writes config.json and key files."""
+    import getpass, platform
+    path = os.path.join(HERE, "config.json")
+    cfg = {}
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f: cfg = json.load(f)
+    def ask(q, default=""):
+        a = input(f"{q}{f' [{default}]' if default else ''}: ").strip()
+        return a or default
+    def save_key(name, label):
+        k = getpass.getpass(f"Вставь {label} (ввод не виден, Enter — пропустить): ").strip()
+        if k:
+            fp = os.path.join(HERE, name)
+            with open(fp, "w", encoding="utf-8") as f: f.write(k)
+            if not IS_WIN: os.chmod(fp, 0o600)
+            print("  ключ сохранён в", name)
+        return bool(k) or bool(read_secret(name))
+    print("\n=== Настройка Джарвиса ===")
+    cfg["owner_name"] = ask("Как Джарвису тебя называть", cfg.get("owner_name", ""))
+    cfg["city"] = ask("Твой город (для погоды и времени)", cfg.get("city", ""))
+    found = [b for b, exe in (("claude", "claude"), ("cursor", "cursor-agent"), ("codex", "codex")) if shutil.which(exe)]
+    print("\nМозг Джарвиса:")
+    print("  claude — подписка Claude      " + ("(найден)" if "claude" in found else "(не установлен)"))
+    print("  cursor — подписка Cursor      " + ("(найден)" if "cursor" in found else "(не установлен)"))
+    print("  codex  — подписка ChatGPT     " + ("(найден)" if "codex" in found else "(не установлен)"))
+    print("  api    — бесплатный ключ Groq (без подписки)")
+    b = ask("Что выбрать", cfg.get("brain") or (found[0] if found else "api"))
+    while b not in ("claude", "cursor", "codex", "api"):
+        b = ask("Напиши claude, cursor, codex или api", "api")
+    cfg["brain"] = b
+    groq = False
+    if b == "api":
+        print("Ключ Groq: console.groq.com → API Keys → Create API Key")
+        groq = save_key(cfg.get("api_key_file", "groq_key.txt"), "ключ Groq")
+    strong = (sys.platform == "darwin" and platform.machine() == "arm64") or bool(shutil.which("nvidia-smi"))
+    if groq or b == "api":
+        cfg["stt"] = "groq"; print("Распознавание речи: Groq (тот же ключ, быстро на любом ПК)")
+    elif strong:
+        cfg["stt"] = "local"; cfg["stt_model"] = "large-v3-turbo"; print("Распознавание речи: на этом компьютере (мощный процессор/видеокарта)")
+    else:
+        print("\nКомпьютер без видеокарты NVIDIA: точное распознавание будет медленным.")
+        if ask("Использовать бесплатный ключ Groq для распознавания? (y/n)", "y").lower().startswith("y"):
+            cfg["stt"] = "groq"; save_key(cfg.get("groq_key_file", "groq_key.txt"), "ключ Groq (console.groq.com)")
+        else:
+            cfg["stt"] = "local"; cfg["stt_model"] = "small"
+    if ask("\nЖивой голос ElevenLabs вместо бесплатного? Нужен их ключ (y/n)", "n").lower().startswith("y"):
+        if save_key(cfg.get("elevenlabs_key_file", "eleven_key.txt"), "ключ ElevenLabs"): cfg["tts"] = "elevenlabs"
+    else:
+        cfg["tts"] = "edge"
+    cfg["camera"] = ask("Разрешить камеру по команде «посмотри»? (y/n)", "y").lower().startswith("y")
+    with open(path, "w", encoding="utf-8") as f: json.dump(cfg, f, ensure_ascii=False, indent=2)
+    print("\nСохранено в config.json. Поменять можно в любой момент: запусти установщик ещё раз или открой этот файл.")
+
+def to_logfile():
+    """Background start (autostart) has no console: write everything to ~/.jarvis-assistant/jarvis.log."""
+    f = open(os.path.join(DATA, "jarvis.log"), "a", encoding="utf-8", buffering=1)
+    sys.stdout = sys.stderr = f
+
 if __name__ == "__main__":
-    if "--look" in sys.argv:
+    if sys.stdout is None or "--service" in sys.argv:
+        to_logfile()
+    if "--version" in sys.argv:
+        print(__version__)
+    elif "--setup" in sys.argv:
+        setup()
+    elif "--doctor" in sys.argv:
+        sys.exit(1 if doctor() else 0)
+    elif "--look" in sys.argv:
         print(look())
     elif "--test" in sys.argv:
         self_test()
